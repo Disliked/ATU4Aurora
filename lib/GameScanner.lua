@@ -120,6 +120,41 @@ local function buildPath(row)
     return PathUtils.join(directory, executable)
 end
 
+local function appendUnique(target, value)
+    if target == nil or value == nil then
+        return
+    end
+
+    local normalized = tostring(value)
+    if normalized == "" then
+        return
+    end
+
+    for _, existing in ipairs(target) do
+        if tostring(existing) == normalized then
+            return
+        end
+    end
+
+    target[#target + 1] = value
+end
+
+local function choosePreferredName(currentName, candidateName)
+    if PathUtils.isEmpty(candidateName) then
+        return currentName
+    end
+
+    if PathUtils.isEmpty(currentName) then
+        return candidateName
+    end
+
+    if #tostring(candidateName) > #tostring(currentName) then
+        return candidateName
+    end
+
+    return currentName
+end
+
 function GameScanner.scanInstalledTitles(logger)
     -- ASSUMPTION: Aurora exposes Content.db as the active SQL connection for utility scripts.
     -- ASSUMPTION: ContentItems is the installed-title table on public Aurora builds, with DvdCache as a fallback discovery target.
@@ -143,28 +178,54 @@ function GameScanner.scanInstalledTitles(logger)
         }
     end
 
-    local seen = {}
+    local grouped = {}
     local games = {}
+    local duplicateRowsCollapsed = 0
 
     for _, row in ipairs(rows) do
         local titleId = PathUtils.normalizeHex(row.title_id, 8)
         local mediaId = PathUtils.normalizeHex(row.media_id, 8)
         local name = row.title_name or ("Title " .. tostring(titleId or "UNKNOWN"))
+        local path = buildPath(row)
 
         if titleId ~= nil then
-            local dedupeKey = titleId .. ":" .. tostring(mediaId or "")
-            if not seen[dedupeKey] then
-                seen[dedupeKey] = true
-                games[#games + 1] = {
+            local existing = grouped[titleId]
+            if existing == nil then
+                existing = {
                     content_id = row.content_id,
                     title_id = titleId,
                     media_id = mediaId,
+                    media_ids = {},
                     name = name,
-                    path = buildPath(row),
+                    path = path,
+                    paths = {},
                     content_type = row.content_type,
                     disc_num = row.disc_num,
+                    disc_numbers = {},
                     source_table = sourceTable
                 }
+                grouped[titleId] = existing
+                games[#games + 1] = existing
+            else
+                duplicateRowsCollapsed = duplicateRowsCollapsed + 1
+                existing.name = choosePreferredName(existing.name, name)
+                if PathUtils.isEmpty(existing.path) then
+                    existing.path = path
+                end
+                if PathUtils.isEmpty(existing.media_id) then
+                    existing.media_id = mediaId
+                end
+                if PathUtils.isEmpty(existing.disc_num) then
+                    existing.disc_num = row.disc_num
+                end
+            end
+
+            appendUnique(existing.media_ids, mediaId)
+            appendUnique(existing.paths, path)
+            appendUnique(existing.disc_numbers, row.disc_num)
+
+            if existing.media_id == nil and #existing.media_ids > 0 then
+                existing.media_id = existing.media_ids[1]
             end
         elseif logger ~= nil then
             logger.warn("Skipping row without a usable Title ID: " .. tostring(name))
@@ -177,12 +238,19 @@ function GameScanner.scanInstalledTitles(logger)
 
     if logger ~= nil then
         logger.info("Scanned " .. tostring(#games) .. " installed titles from " .. sourceTable)
+        if duplicateRowsCollapsed > 0 then
+            logger.info(
+                "Collapsed " .. tostring(duplicateRowsCollapsed) ..
+                " duplicate Aurora content rows into unique Title ID queue entries."
+            )
+        end
     end
 
     return games, {
         source_table = sourceTable,
         total_rows = #rows,
         total_titles = #games,
+        duplicate_rows_collapsed = duplicateRowsCollapsed,
         discovery = discovery
     }
 end

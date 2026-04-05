@@ -44,7 +44,7 @@ function State.save(path, state, logger)
     end
 
     local success, encoded = pcall(function()
-        return json:encode_pretty(state)
+        return json:encode(state)
     end)
 
     if not success then

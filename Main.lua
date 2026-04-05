@@ -1,6 +1,6 @@
 scriptTitle = "Auto Title Update Sync"
 scriptAuthor = "Disliked"
-scriptVersion = 1.0
+scriptVersion = 1.1
 scriptDescription = "Scans Aurora's content database and syncs latest TU files using mock or XboxUnity providers."
 scriptIcon = "icon.png"
 scriptPermissions = { "sql", "filesystem", "http" }
@@ -15,12 +15,20 @@ local Ui = require("lib\\Ui")
 
 local function finish(summary, queueState)
     Logger.info("Showing results dialog.")
+    Logger.flush(true)
     Ui.showResults(queueState.queue, summary)
     Logger.info("Showing summary dialog.")
+    Logger.flush(true)
     Ui.showSummary(summary)
 
     if summary.downloads_completed > 0 then
-        Script.SetRefreshListOnExit(true)
+        if type(Script.SetRefreshListOnExit) == "function" then
+            pcall(function()
+                Script.SetRefreshListOnExit(true)
+            end)
+        else
+            Logger.info("Script.SetRefreshListOnExit is unavailable in this Aurora build.")
+        end
 
         if Ui.promptRestart(summary, queueState.written_destinations) then
             Logger.info("User accepted Aurora restart prompt.")
@@ -59,6 +67,7 @@ local function logUnhandledError(errorMessage)
         end
 
         Logger.error("Unhandled script error: " .. tostring(errorMessage))
+        Logger.flush(true)
     end)
 
     if not logged then
@@ -70,22 +79,6 @@ local function notifyUnhandledError()
     pcall(function()
         Script.ShowNotification(scriptTitle .. " failed. Check " .. tostring(config.log_path))
     end)
-end
-
-local function buildScanOnlyQueue(games)
-    local queue = {}
-
-    for index, game in ipairs(games) do
-        queue[index] = {
-            game = game,
-            provider_status = "not_queried",
-            selected_tu_version = "-",
-            local_action = "scanned only",
-            status = "scanned"
-        }
-    end
-
-    return queue
 end
 
 local function scanInstalledTitles()
@@ -110,23 +103,6 @@ local function processFreshRun(mode, provider)
 
     if #games == 0 then
         Ui.showError("No Titles Found", "Aurora did not return any installed titles from the local database.")
-        return false
-    end
-
-    if mode == "scan_only" then
-        local summary = {
-            total_titles_scanned = #games,
-            updates_found = 0,
-            downloads_completed = 0,
-            skipped = 0,
-            failed = 0,
-            dry_run_hits = 0,
-            canceled = false
-        }
-
-        Ui.showResults(buildScanOnlyQueue(games), summary)
-        Ui.showSummary(summary)
-        Logger.info("Completed scan-only run with " .. tostring(#games) .. " titles.")
         return false
     end
 
@@ -182,6 +158,7 @@ end
 
 local function runScript()
     Logger.init(config.log_path)
+    Logger.setFlushInterval(config.log_flush_interval)
     Logger.info("Starting " .. scriptTitle .. " v" .. tostring(scriptVersion))
     Logger.info("Configured provider: " .. tostring(config.provider))
 
@@ -210,8 +187,10 @@ function main()
     end
 
     if success and restartRequestedOrError == true then
+        Logger.flush(true)
         return
     end
 
+    Logger.flush(true)
     resetScriptUi()
 end

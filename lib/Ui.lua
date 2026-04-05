@@ -61,7 +61,6 @@ end
 
 function Ui.showMainMenu(config)
     local items = {
-        "Scan only",
         "Dry run",
         "Download one selected game",
         "Download all games"
@@ -76,12 +75,10 @@ function Ui.showMainMenu(config)
 
     local selectedKey = getSelectedKey(dialog)
     if selectedKey == 1 then
-        return "scan_only"
-    elseif selectedKey == 2 then
         return "dry_run"
-    elseif selectedKey == 3 then
+    elseif selectedKey == 2 then
         return "download_one"
-    elseif selectedKey == 4 then
+    elseif selectedKey == 3 then
         return "download_all"
     end
 

@@ -16,6 +16,57 @@ local function toNumber(value)
     return numberValue
 end
 
+local function trimWhitespace(value)
+    local text = tostring(value or "")
+    text = text:gsub("^%s+", "")
+    text = text:gsub("%s+$", "")
+    return text
+end
+
+local function findJsonStart(text)
+    local objectStart = text:find("{", 1, true)
+    local arrayStart = text:find("[", 1, true)
+
+    if objectStart ~= nil and arrayStart ~= nil then
+        return math.min(objectStart, arrayStart)
+    end
+
+    return objectStart or arrayStart
+end
+
+local function extractJsonPayload(text)
+    local startIndex = findJsonStart(text)
+    if startIndex == nil then
+        return text
+    end
+
+    local startCharacter = text:sub(startIndex, startIndex)
+    local closingCharacter = startCharacter == "{" and "}" or "]"
+    local endIndex = nil
+
+    for index = #text, startIndex, -1 do
+        if text:sub(index, index) == closingCharacter then
+            endIndex = index
+            break
+        end
+    end
+
+    if endIndex == nil then
+        return text:sub(startIndex)
+    end
+
+    return text:sub(startIndex, endIndex)
+end
+
+local function normalizeLookupBody(body)
+    local normalized = tostring(body or "")
+    normalized = normalized:gsub("^\239\187\191", "")
+    normalized = trimWhitespace(normalized)
+    normalized = extractJsonPayload(normalized)
+    normalized = trimWhitespace(normalized)
+    return normalized
+end
+
 local function normalizeMediaId(value)
     local mediaId = PathUtils.normalizeHex(value, 8)
     if mediaId == "00000000" then
@@ -23,6 +74,31 @@ local function normalizeMediaId(value)
     end
 
     return mediaId
+end
+
+local function normalizeRequestedMediaIds(requestedMediaId)
+    local ids = {}
+    local seen = {}
+
+    local function addValue(value)
+        local mediaId = normalizeMediaId(value)
+        if mediaId == nil or seen[mediaId] then
+            return
+        end
+
+        seen[mediaId] = true
+        ids[#ids + 1] = mediaId
+    end
+
+    if type(requestedMediaId) == "table" then
+        for _, value in ipairs(requestedMediaId) do
+            addValue(value)
+        end
+    else
+        addValue(requestedMediaId)
+    end
+
+    return ids, seen
 end
 
 local function buildCandidate(update, titleId, mediaId)
@@ -72,8 +148,13 @@ function XboxUnityProvider.new(config, logger)
 end
 
 function XboxUnityProvider:decodeLookupResponse(body)
+    local normalizedBody = normalizeLookupBody(body)
+    if PathUtils.isEmpty(normalizedBody) then
+        return nil, "Provider returned an empty response."
+    end
+
     local success, decoded = pcall(function()
-        return json:decode(body)
+        return json:decode(normalizedBody)
     end)
 
     if not success then
@@ -89,12 +170,13 @@ end
 
 function XboxUnityProvider:collectCandidates(payload, requestedTitleId, requestedMediaId)
     local candidates = {}
-    local normalizedRequestedMediaId = normalizeMediaId(requestedMediaId)
+    local normalizedRequestedMediaIds, requestedMediaIdSet = normalizeRequestedMediaIds(requestedMediaId)
+    local hasRequestedMediaIds = #normalizedRequestedMediaIds > 0
 
     if payload.Type == 1 and type(payload.MediaIDS) == "table" then
         for _, mediaItem in ipairs(payload.MediaIDS) do
             local mediaId = normalizeMediaId(mediaItem.MediaID)
-            local exactMediaMatch = normalizedRequestedMediaId == nil or mediaId == normalizedRequestedMediaId
+            local exactMediaMatch = not hasRequestedMediaIds or requestedMediaIdSet[mediaId] == true
 
             if exactMediaMatch and type(mediaItem.Updates) == "table" then
                 for _, update in ipairs(mediaItem.Updates) do
@@ -104,8 +186,8 @@ function XboxUnityProvider:collectCandidates(payload, requestedTitleId, requeste
         end
     elseif payload.Type == 2 and type(payload.Updates) == "table" then
         for _, update in ipairs(payload.Updates) do
-            local mediaId = normalizeMediaId(update.MediaID) or normalizedRequestedMediaId
-            local exactMediaMatch = normalizedRequestedMediaId == nil or mediaId == normalizedRequestedMediaId
+            local mediaId = normalizeMediaId(update.MediaID) or normalizedRequestedMediaIds[1]
+            local exactMediaMatch = not hasRequestedMediaIds or requestedMediaIdSet[mediaId] == true
 
             if exactMediaMatch then
                 candidates[#candidates + 1] = buildCandidate(update, requestedTitleId, mediaId)
@@ -113,7 +195,7 @@ function XboxUnityProvider:collectCandidates(payload, requestedTitleId, requeste
         end
     end
 
-    if #candidates == 0 and normalizedRequestedMediaId ~= nil then
+    if #candidates == 0 and hasRequestedMediaIds then
         if payload.Type == 1 and type(payload.MediaIDS) == "table" then
             for _, mediaItem in ipairs(payload.MediaIDS) do
                 local mediaId = normalizeMediaId(mediaItem.MediaID)
@@ -174,13 +256,21 @@ function XboxUnityProvider:findLatestTU(titleId, mediaId)
                 ". Falling back to newest TU for the title."
             )
         end
+
+        if type(mediaId) == "table" and #mediaId > 1 then
+            self.logger.info(
+                "Considered " .. tostring(#mediaId) ..
+                " media IDs for " .. tostring(normalizedTitleId) ..
+                " while selecting the newest TU."
+            )
+        end
     end
 
     return candidates[1]
 end
 
-function XboxUnityProvider:downloadTU(updateInfo, destinationPath)
-    return Downloader.downloadHttp(updateInfo, destinationPath, self.config, self.logger)
+function XboxUnityProvider:downloadTU(updateInfo, destinationPath, runtimeConfig)
+    return Downloader.downloadHttp(updateInfo, destinationPath, runtimeConfig or self.config, self.logger)
 end
 
 return XboxUnityProvider

@@ -15,11 +15,15 @@ AuroraScripts/UtilityScripts/AutoTitleUpdateSync/
 - Scans Aurora's local database with the `sql` permission instead of assuming a web API exists for installed games.
 - Extracts each title's name, Title ID, Media ID when available, and source path information.
 - Builds an internal queue that can process one title or all titles.
-- Supports `Scan only`, `Dry run`, `Download one selected game`, `Download all games`, and `Resume previous sync`.
+- Collapses duplicate Aurora content rows into a single queue item per Title ID so multi-disc games do not get processed repeatedly.
+- Supports `Dry run`, `Download one selected game`, `Download all games`, and `Resume previous sync`.
 - Uses a provider abstraction with a live `XboxUnityProvider` by default and a fully runnable `MockProvider` fallback.
 - Downloads to a staging path first, then copies to the resolved final TU path only after verification.
 - Writes timestamped log output to disk.
 - Saves resumable queue state to disk.
+- Remembers the latest successfully handled TU per title in a local download index so repeat runs can skip redownloading the same update.
+- Captures a local hash for each successfully written TU and reuses that local hash on later runs when the same TUID/version is selected again.
+- Batches queue-state, download-index, and log-file writes so large `Download all games` runs spend less time rewriting metadata on disk.
 
 ## Repository Layout
 
@@ -31,8 +35,10 @@ AuroraScripts/UtilityScripts/AutoTitleUpdateSync/
 |- config.lua
 |- icon.png
 \- lib/
+   |- DownloadIndex.lua
    |- Downloader.lua
    |- GameScanner.lua
+   |- HashUtils.lua
    |- Logger.lua
    |- PathResolver.lua
    |- PathUtils.lua
@@ -74,7 +80,7 @@ Edit [config.lua](config.lua):
 - Set `provider = "xboxunity"` for live TU lookup and download from XboxUnity.
 - Set `provider = "mock"` for a testable, offline-safe run with sample data.
 
-`XboxUnityProvider` now uses the public XboxUnity title update endpoints directly:
+`XboxUnityProvider` uses the public XboxUnity title update endpoints directly:
 
 - `https://xboxunity.net/Resources/Lib/TitleUpdateInfo.php?titleid=...`
 - `https://xboxunity.net/Resources/Lib/TitleUpdate.php?tuid=...`
@@ -97,14 +103,14 @@ Important notes:
 
 Dry-run mode performs scanning, queue building, provider lookups, and destination resolution without writing TU payload files to staging or final output paths.
 
-This version still writes the normal log file and queue state file during dry-run so you can inspect what would have happened and resume a canceled run.
+Dry-run is optimized for speed: it skips queue-state persistence, removes the small per-item delay, and reduces provider lookup retries to a single attempt.
 
 Important:
 
 - Choosing `Dry run` in the menu is the only mode that suppresses TU payload writes.
 - Choosing `Download one selected game` or `Download all games` performs a real write attempt.
 - The `dry_run` value in [config.lua](config.lua) is kept for compatibility and reference, but the menu selection is what controls whether the current run writes files.
-- If Aurora does not expose the server filename before download, dry-run will still show the real TU version but will mark the final destination as pending server filename resolution.
+- With the default `discover_server_filename = false` setting, dry-run shows the staged filename that would be used for the real download path.
 
 ## Logging And Debugging
 
@@ -120,18 +126,39 @@ State is written to:
 Hdd1:\Aurora\AutoTU\state.json
 ```
 
+The latest-download index is written to:
+
+```text
+Hdd1:\Aurora\AutoTU\download_index.json
+```
+
 If a run is interrupted and the state file is still valid, the next launch will prompt:
 
 ```text
 Resume previous sync?
 ```
 
+Performance-related defaults live in [config.lua](config.lua):
+
+- `log_flush_interval = 20`
+- `state_save_interval = 5`
+- `download_index_save_interval = 5`
+- `queue_item_delay_ms = 0`
+- `discover_server_filename = false`
+
+Lower intervals write progress metadata more often. Higher intervals are faster but may lose a few queue positions if the console is powered off mid-run.
+
 ## Known Limitations
 
 - No documented public AuroraScripts API was assumed for direct TU install or activation.
 - The default destination logic is intentionally centralized and conservative, not guaranteed correct for every Aurora setup.
 - `XboxUnityProvider` depends on the public XboxUnity endpoints remaining reachable and response-compatible.
-- AuroraScripts `Http.Get` does not publicly document response-header access, so the downloader first tries to preserve the server filename automatically and falls back to a staged filename if Aurora does not expose it cleanly.
+- AuroraScripts `Http.Get` does not publicly document response-header access, so server filename discovery is disabled by default for reliability and speed.
+- Repeat-run skip detection is intentionally simple: the script only skips when the provider selects the same TU again and the existing destination file hash matches the locally recorded hash from a previous successful run.
+- If the destination hash does not match the locally recorded hash, or there is no reusable local hash yet, the script redownloads the TU and overwrites the destination file.
+- Provider lookups stop retrying early for permanent `not_found` and invalid-title responses, which helps large library scans finish faster.
+- Provider response decoding now trims BOM/whitespace and extracts the JSON payload before parsing, but transient XboxUnity response issues can still happen.
+- Enabling `discover_server_filename` can cause an unnecessary second download per TU on Aurora builds that only expose a `.dl` placeholder name.
 - Queue cancellation is checked between queued items and retry boundaries. This version does not rely on undocumented streaming download callbacks.
 - Archive extraction is not automatically performed in this version.
 

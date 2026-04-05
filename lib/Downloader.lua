@@ -56,6 +56,53 @@ local function findDownloadedAutoFile(directoryPath)
     return nil, nil
 end
 
+local function isUsableDiscoveredFileName(fileName)
+    if PathUtils.isEmpty(fileName) then
+        return false
+    end
+
+    local normalized = tostring(fileName)
+    if normalized == "." or normalized == ".." then
+        return false
+    end
+
+    if normalized:sub(1, 1) == "." then
+        return false
+    end
+
+    return true
+end
+
+local function pickReusableFile(files, expectedSize)
+    if #files == 0 then
+        return nil
+    end
+
+    if expectedSize <= 0 then
+        return nil
+    end
+
+    if #files == 1 then
+        local onlyFile = files[1]
+        if tonumber(onlyFile.size or 0) == expectedSize then
+            return onlyFile, "single_file"
+        end
+    end
+
+    local sizeMatches = {}
+    for _, fileInfo in ipairs(files) do
+        if tonumber(fileInfo.size or 0) == expectedSize then
+            sizeMatches[#sizeMatches + 1] = fileInfo
+        end
+    end
+
+    if #sizeMatches == 1 then
+        return sizeMatches[1], "size_match"
+    end
+
+    return nil, nil
+end
+
 local function moveTempFileToStage(tempPath, stagePath, overwriteExisting, logger)
     PathUtils.ensureParentDirectory(stagePath)
 
@@ -87,6 +134,41 @@ function Downloader.buildStagePath(game, updateInfo, config)
         PathUtils.ensureTrailingSlash(config.download_root or ""),
         tostring(game.title_id or "UNKNOWN") .. "\\" .. fileName
     )
+end
+
+function Downloader.findReusableStagePath(stagePath, updateInfo, logger)
+    if FileSystem.FileExists(stagePath) then
+        if logger ~= nil then
+            logger.info("Reusing exact staged download " .. tostring(stagePath))
+        end
+        return stagePath
+    end
+
+    local parentDirectory = PathUtils.getParent(stagePath)
+    if parentDirectory == nil or not FileSystem.FileExists(parentDirectory) then
+        return nil
+    end
+
+    local reusableFile, reason = pickReusableFile(
+        getDirectoryFiles(parentDirectory),
+        tonumber(updateInfo.expected_size_bytes or 0) or 0
+    )
+
+    if reusableFile == nil then
+        return nil
+    end
+
+    updateInfo.filename = reusableFile.name
+    updateInfo.filename_is_placeholder = false
+
+    if logger ~= nil then
+        logger.info(
+            "Reusing existing staged TU " .. tostring(reusableFile.path) ..
+            " using " .. tostring(reason) .. " heuristic."
+        )
+    end
+
+    return reusableFile.path
 end
 
 local function buildSiblingStagePath(stagePath, fileName)
@@ -134,6 +216,13 @@ local function tryAutoNamedDownload(updateInfo, stagePath, config, logger)
         return nil, "auto_filename_unavailable"
     end
 
+    if not isUsableDiscoveredFileName(discoveredName) then
+        if logger ~= nil then
+            logger.warn("Ignoring unusable auto-discovered TU filename: " .. tostring(discoveredName))
+        end
+        return nil, "invalid_server_filename"
+    end
+
     local finalStagePath = buildSiblingStagePath(stagePath, discoveredName)
     if logger ~= nil then
         logger.info("Discovered server TU filename: " .. tostring(discoveredName))
@@ -153,18 +242,18 @@ local function tryAutoNamedDownload(updateInfo, stagePath, config, logger)
 end
 
 function Downloader.downloadHttp(updateInfo, stagePath, config, logger)
-    if FileSystem.FileExists(stagePath) and not config.overwrite_existing then
-        if logger ~= nil then
-            logger.info("Reusing existing staged download " .. tostring(stagePath))
+    if not config.overwrite_existing then
+        local reusablePath = Downloader.findReusableStagePath(stagePath, updateInfo, logger)
+        if reusablePath ~= nil then
+            return reusablePath
         end
-        return stagePath
     end
 
     if PathUtils.isEmpty(updateInfo.download_url) then
         return nil, "Provider did not return a usable download URL."
     end
 
-    if updateInfo.prefer_server_filename ~= false then
+    if config.discover_server_filename == true and updateInfo.prefer_server_filename ~= false then
         local autoPath, autoError = tryAutoNamedDownload(updateInfo, stagePath, config, logger)
         if autoPath ~= nil then
             return autoPath

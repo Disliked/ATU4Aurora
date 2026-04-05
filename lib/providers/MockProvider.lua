@@ -108,8 +108,8 @@ function MockProvider:findLatestTU(titleId, mediaId)
     return newest
 end
 
-function MockProvider:downloadTU(updateInfo, destinationPath)
-    return Downloader.writeMockPayload(updateInfo, destinationPath, self.config, self.logger)
+function MockProvider:downloadTU(updateInfo, destinationPath, runtimeConfig)
+    return Downloader.writeMockPayload(updateInfo, destinationPath, runtimeConfig or self.config, self.logger)
 end
 
 return MockProvider
